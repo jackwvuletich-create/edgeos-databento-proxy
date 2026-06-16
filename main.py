@@ -22,10 +22,10 @@ app.add_middleware(
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY")
 
 SYMBOL_MAP = {
-    "ES": "ES.FUT",
-    "NQ": "NQ.FUT",
-    "MES": "MES.FUT",
-    "MNQ": "MNQ.FUT",
+    "ES": "ES.c.0",
+    "NQ": "NQ.c.0",
+    "MES": "MES.c.0",
+    "MNQ": "MNQ.c.0",
 }
 
 latest_prices: Dict[str, Dict[str, Any]] = {}
@@ -49,8 +49,6 @@ def normalize_price(value):
     except Exception:
         return None
 
-    # Databento prices often come through as fixed-point integers.
-    # This protects against huge raw values.
     if number > 1_000_000:
         return number / 1_000_000_000
 
@@ -101,7 +99,7 @@ def start_live_client():
         client.subscribe(
             dataset="GLBX.MDP3",
             schema="trades",
-            stype_in="parent",
+            stype_in="continuous",
             symbols=list(SYMBOL_MAP.values()),
         )
 
