@@ -38,7 +38,15 @@ app.get("/snapshot", async (req, res) => {
     const results = {};
 
     for (const [symbol, databentoSymbol] of Object.entries(SYMBOLS)) {
-      const startTime = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+
+      const endDate = new Date();
+      endDate.setSeconds(0, 0);
+
+      const startDate = new Date(endDate.getTime() - 30 * 60 * 1000);
+      startDate.setSeconds(0, 0);
+
+      const startTime = startDate.toISOString();
+      const endTime = endDate.toISOString();
 
       const url =
         `https://hist.databento.com/v0/timeseries.get_range` +
@@ -47,6 +55,7 @@ app.get("/snapshot", async (req, res) => {
         `&schema=trades` +
         `&stype_in=continuous` +
         `&start=${encodeURIComponent(startTime)}` +
+        `&end=${encodeURIComponent(endTime)}` +
         `&encoding=json`;
 
       const response = await fetch(url, {
@@ -98,6 +107,7 @@ app.get("/snapshot", async (req, res) => {
       generatedAt: new Date().toISOString(),
       data: results
     });
+
   } catch (error) {
     res.status(500).json({
       ok: false,
