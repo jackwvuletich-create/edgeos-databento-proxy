@@ -1,8 +1,9 @@
 import os
 import time
 import threading
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import databento as db
 from fastapi import FastAPI
@@ -29,9 +30,15 @@ SYMBOL_MAP = {
 }
 
 latest_prices: Dict[str, Dict[str, Any]] = {}
+instrument_to_symbol: Dict[int, str] = {}
+
+debug_records: List[str] = []
+
 status: Dict[str, Any] = {
     "live_client_started": False,
     "last_record_at": None,
+    "last_any_record_at": None,
+    "record_count": 0,
     "error": None,
 }
 
@@ -55,28 +62,90 @@ def normalize_price(value):
     return number
 
 
+def save_debug(record_text: str):
+    debug_records.append(record_text[:1500])
+
+    if len(debug_records) > 20:
+        debug_records.pop(0)
+
+
+def get_instrument_id(record):
+    try:
+        if hasattr(record, "instrument_id"):
+            return int(record.instrument_id)
+
+        if hasattr(record, "hd") and hasattr(record.hd, "instrument_id"):
+            return int(record.hd.instrument_id)
+
+        text = str(record)
+        match = re.search(r"instrument_id[=:]\s*(\d+)", text)
+        if match:
+            return int(match.group(1))
+
+    except Exception:
+        return None
+
+    return None
+
+
+def detect_symbol_from_text(record_text: str):
+    for edge_symbol, db_symbol in SYMBOL_MAP.items():
+        if db_symbol in record_text:
+            return edge_symbol
+
+    for edge_symbol in SYMBOL_MAP.keys():
+        if f"symbol='{edge_symbol}" in record_text or f"symbol={edge_symbol}" in record_text:
+            return edge_symbol
+
+    return None
+
+
+def detect_price(record):
+    for attr in ["price", "px", "close", "last"]:
+        if hasattr(record, attr):
+            price = normalize_price(getattr(record, attr))
+            if price:
+                return price
+
+    text = str(record)
+
+    for pattern in [
+        r"price[=:]\s*([0-9]+)",
+        r"px[=:]\s*([0-9]+)",
+        r"close[=:]\s*([0-9]+)",
+    ]:
+        match = re.search(pattern, text)
+        if match:
+            return normalize_price(match.group(1))
+
+    return None
+
+
 def handle_record(record):
     try:
         record_text = str(record)
 
-        matched_symbol = None
-        for edge_symbol, db_symbol in SYMBOL_MAP.items():
-            if db_symbol in record_text or edge_symbol in record_text:
-                matched_symbol = edge_symbol
-                break
+        status["record_count"] += 1
+        status["last_any_record_at"] = now_iso()
+        save_debug(record_text)
 
-        price = None
+        instrument_id = get_instrument_id(record)
+        detected_symbol = detect_symbol_from_text(record_text)
 
-        if hasattr(record, "price"):
-            price = normalize_price(record.price)
-        elif hasattr(record, "px"):
-            price = normalize_price(record.px)
+        if instrument_id and detected_symbol:
+            instrument_to_symbol[instrument_id] = detected_symbol
 
-        if matched_symbol and price:
-            latest_prices[matched_symbol] = {
+        if not detected_symbol and instrument_id:
+            detected_symbol = instrument_to_symbol.get(instrument_id)
+
+        price = detect_price(record)
+
+        if detected_symbol and price:
+            latest_prices[detected_symbol] = {
                 "ok": True,
-                "symbol": matched_symbol,
-                "databento_symbol": SYMBOL_MAP[matched_symbol],
+                "symbol": detected_symbol,
+                "databento_symbol": SYMBOL_MAP[detected_symbol],
+                "instrument_id": instrument_id,
                 "price": price,
                 "received_at": now_iso(),
                 "raw": record_text[:1000],
@@ -127,7 +196,7 @@ def root():
     return {
         "ok": True,
         "service": "edgeos-databento-live-proxy",
-        "endpoints": ["/health", "/snapshot"],
+        "endpoints": ["/health", "/snapshot", "/debug"],
     }
 
 
@@ -139,6 +208,8 @@ def health():
         "hasKey": bool(DATABENTO_API_KEY),
         "liveClientStarted": status["live_client_started"],
         "lastRecordAt": status["last_record_at"],
+        "lastAnyRecordAt": status["last_any_record_at"],
+        "recordCount": status["record_count"],
         "error": status["error"],
         "time": now_iso(),
     }
@@ -183,4 +254,15 @@ def snapshot():
         "generatedAt": generated_at,
         "status": status,
         "data": data,
+    }
+
+
+@app.get("/debug")
+def debug():
+    return {
+        "ok": True,
+        "status": status,
+        "instrument_to_symbol": instrument_to_symbol,
+        "latest_prices": latest_prices,
+        "last_records": debug_records,
     }
