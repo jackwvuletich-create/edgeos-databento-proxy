@@ -147,21 +147,46 @@ state: Dict[str, Any] = {
     "roll_rule": ROLL_RULE,
     "started_at": now_iso(),
     "last_heartbeat": None,
-    "last_error": None,
-    "symbols": {
+"last_error": None,
+"record_count": 0,
+"last_any_record_at": None,
+"last_record_at": None,
+"symbols": {
         clean_symbol: make_empty_symbol_state(clean_symbol, requested_symbol)
         for clean_symbol, requested_symbol in SYMBOLS.items()
     },
 }
 
+debug_records: List[str] = []
+instrument_to_symbol: Dict[int, str] = {}
+
+
+def save_debug(record_text: str):
+    debug_records.append(record_text[:1500])
+    if len(debug_records) > 20:
+        debug_records.pop(0)
+
+
+def get_instrument_id(record: Any) -> Optional[int]:
+    try:
+        if hasattr(record, "instrument_id"):
+            return int(record.instrument_id)
+
+        if hasattr(record, "hd") and hasattr(record.hd, "instrument_id"):
+            return int(record.hd.instrument_id)
+
+        return None
+    except Exception:
+        return None
 
 def identify_symbol(record: Any) -> Optional[str]:
     raw_text = str(record)
+    instrument_id = get_instrument_id(record)
 
     for clean_symbol, requested_symbol in SYMBOLS.items():
-        if requested_symbol in raw_text:
-            return clean_symbol
-        if f"{clean_symbol}." in raw_text:
+        if requested_symbol in raw_text or f"{clean_symbol}." in raw_text:
+            if instrument_id is not None:
+                instrument_to_symbol[instrument_id] = clean_symbol
             return clean_symbol
 
     direct_symbol = get_attr(record, "symbol", None)
@@ -169,14 +194,16 @@ def identify_symbol(record: Any) -> Optional[str]:
     if direct_symbol:
         direct_symbol = str(direct_symbol)
         for clean_symbol, requested_symbol in SYMBOLS.items():
-            if direct_symbol == requested_symbol:
+            if direct_symbol == requested_symbol or direct_symbol.startswith(f"{clean_symbol}."):
+                if instrument_id is not None:
+                    instrument_to_symbol[instrument_id] = clean_symbol
                 return clean_symbol
-            if direct_symbol.startswith(f"{clean_symbol}."):
-                return clean_symbol
+
+    if instrument_id is not None:
+        return instrument_to_symbol.get(instrument_id)
 
     return None
-
-
+    
 def append_limited(bar_list: List[Dict[str, Any]], bar: Dict[str, Any]):
     bar_list.append(bar)
     if len(bar_list) > MAX_BARS:
@@ -241,6 +268,13 @@ def update_realtime_flags(symbol_state: Dict[str, Any]):
 
 
 def update_from_trade(record: Any):
+    record_text = str(record)
+    save_debug(record_text)
+
+    with state_lock:
+        state["record_count"] = int(state.get("record_count") or 0) + 1
+        state["last_any_record_at"] = now_iso()
+
     clean_symbol = identify_symbol(record)
 
     if clean_symbol is None:
@@ -360,8 +394,9 @@ def update_from_trade(record: Any):
 
         update_realtime_flags(symbol_state)
 
-        state["ok"] = True
+                state["ok"] = True
         state["last_heartbeat"] = now_iso()
+        state["last_record_at"] = state["last_heartbeat"]
         state["last_error"] = None
 
 
@@ -485,7 +520,7 @@ def snapshot():
             "roll_rule": ROLL_RULE,
             "generatedAt": now_iso(),
             "server_time": now_iso(),
-            "valid_symbols": valid_symbols,
+           in "valid_symbols": valid_symbols,
             "waiting_symbols": waiting_symbols,
 
             # New shape
@@ -520,6 +555,11 @@ def debug():
                 "roll_rule": ROLL_RULE,
                 "symbols": SYMBOLS,
             },
-            "state": state,
+                        "state": state,
+            "record_count": state.get("record_count"),
+            "last_any_record_at": state.get("last_any_record_at"),
+            "last_record_at": state.get("last_record_at"),
+            "instrument_to_symbol": instrument_to_symbol,
+            "last_records": debug_records,
             "server_time": now_iso(),
         }
