@@ -1,4 +1,4 @@
-main_py = r'''import os
+import os
 import time
 import threading
 import traceback
@@ -12,13 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY")
 DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
-
-# Use raw live trades because this is confirmed working on your Databento stream.
-# The proxy builds rolling 1m and 5m OHLCV bars from these live trade ticks.
-SCHEMA = "trades"
-
-# Use calendar front contract because your old working proxy used ES.c.0 / NQ.c.0.
-ROLL_RULE = "c"
+SCHEMA = os.getenv("DATABENTO_SCHEMA", "ohlcv-1s")
+ROLL_RULE = os.getenv("ROLL_RULE", "v")
 
 SYMBOLS = {
     "NQ": f"NQ.{ROLL_RULE}.0",
@@ -85,10 +80,6 @@ def get_attr(record: Any, name: str, default=None):
 
 
 def convert_price(value):
-    """
-    Databento trade prices are often integer nanos.
-    Example: 29545500000000 means 29545.5
-    """
     if value is None:
         return None
 
@@ -118,10 +109,7 @@ def make_empty_symbol_state(clean_symbol: str, requested_symbol: str) -> Dict[st
         "ok": False,
         "symbol": clean_symbol,
         "requested_symbol": requested_symbol,
-        "databento_symbol": requested_symbol,
         "status": "waiting_for_live_trade",
-
-        # latest/current price data
         "price": None,
         "last": None,
         "open": None,
@@ -130,27 +118,17 @@ def make_empty_symbol_state(clean_symbol: str, requested_symbol: str) -> Dict[st
         "close": None,
         "vwap": None,
         "volume": 0,
-
-        # last trade represented as a tiny one-tick bar for backwards compatibility
         "bar": None,
-        "raw": None,
-
-        # timestamps
         "ts_event": None,
         "ts_recv": None,
         "age_seconds": None,
         "proxy_age_seconds": None,
-        "received_at": None,
         "updated_at": None,
-
-        # rolling OHLCV
         "current_1m_bar": None,
         "current_5m_bar": None,
         "bars_1m": [],
         "bars_5m": [],
-
-        # transparency
-        "ohlcv_source": "databento_live_trades",
+        "ohlcv_source": "databento_live_ohlcv_1s",
         "bar_source": "waiting_for_live_data",
         "bars_are_realtime": False,
         "historical_lag_warning": False,
@@ -170,68 +148,31 @@ state: Dict[str, Any] = {
     "started_at": now_iso(),
     "last_heartbeat": None,
     "last_error": None,
-    "record_count": 0,
-    "last_any_record_at": None,
-    "last_record_at": None,
     "symbols": {
         clean_symbol: make_empty_symbol_state(clean_symbol, requested_symbol)
         for clean_symbol, requested_symbol in SYMBOLS.items()
     },
 }
 
-debug_records: List[str] = []
-instrument_to_symbol: Dict[int, str] = {}
-
-
-def save_debug(record_text: str):
-    debug_records.append(record_text[:1500])
-    if len(debug_records) > 20:
-        debug_records.pop(0)
-
-
-def get_instrument_id(record: Any) -> Optional[int]:
-    try:
-        if hasattr(record, "instrument_id"):
-            return int(record.instrument_id)
-
-        if hasattr(record, "hd") and hasattr(record.hd, "instrument_id"):
-            return int(record.hd.instrument_id)
-
-        return None
-    except Exception:
-        return None
-
 
 def identify_symbol(record: Any) -> Optional[str]:
-    """
-    Prefer symbol text detection, then instrument-id memory.
-    This preserves the behavior that made your old trades proxy work.
-    """
     raw_text = str(record)
-    instrument_id = get_instrument_id(record)
 
     for clean_symbol, requested_symbol in SYMBOLS.items():
         if requested_symbol in raw_text:
-            if instrument_id is not None:
-                instrument_to_symbol[instrument_id] = clean_symbol
             return clean_symbol
-
         if f"{clean_symbol}." in raw_text:
-            if instrument_id is not None:
-                instrument_to_symbol[instrument_id] = clean_symbol
             return clean_symbol
 
     direct_symbol = get_attr(record, "symbol", None)
+
     if direct_symbol:
         direct_symbol = str(direct_symbol)
         for clean_symbol, requested_symbol in SYMBOLS.items():
-            if direct_symbol == requested_symbol or direct_symbol.startswith(f"{clean_symbol}."):
-                if instrument_id is not None:
-                    instrument_to_symbol[instrument_id] = clean_symbol
+            if direct_symbol == requested_symbol:
                 return clean_symbol
-
-    if instrument_id is not None:
-        return instrument_to_symbol.get(instrument_id)
+            if direct_symbol.startswith(f"{clean_symbol}."):
+                return clean_symbol
 
     return None
 
@@ -242,24 +183,24 @@ def append_limited(bar_list: List[Dict[str, Any]], bar: Dict[str, Any]):
         del bar_list[0:len(bar_list) - MAX_BARS]
 
 
-def update_bar(existing: Optional[Dict[str, Any]], bucket_seconds: int, price: float, size: int) -> Dict[str, Any]:
+def update_bar(existing: Optional[Dict[str, Any]], bucket_seconds: int, o, h, l, c, v) -> Dict[str, Any]:
     if existing is None or existing.get("bucket") != bucket_seconds:
         return {
             "bucket": bucket_seconds,
             "timestamp": bucket_iso(bucket_seconds),
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price,
-            "volume": int(size or 0),
-            "source": "live_tick_built_from_databento_trades",
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": int(v or 0),
+            "source": "live_built_from_databento_ohlcv_1s",
             "complete": False,
         }
 
-    existing["high"] = max(x for x in [existing.get("high"), price] if x is not None)
-    existing["low"] = min(x for x in [existing.get("low"), price] if x is not None)
-    existing["close"] = price
-    existing["volume"] = int(existing.get("volume") or 0) + int(size or 0)
+    existing["high"] = max(x for x in [existing.get("high"), h, c] if x is not None)
+    existing["low"] = min(x for x in [existing.get("low"), l, c] if x is not None)
+    existing["close"] = c
+    existing["volume"] = int(existing.get("volume") or 0) + int(v or 0)
     existing["complete"] = False
     return existing
 
@@ -299,136 +240,135 @@ def update_realtime_flags(symbol_state: Dict[str, Any]):
     symbol_state["bar_source"] = bar_source
 
 
-def update_from_trade(record: Any):
+def update_from_live_ohlcv(record: Any):
+    clean_symbol = identify_symbol(record)
+
+    if clean_symbol is None:
+        return
+
+    ts_event = get_attr(record, "ts_event", None)
+    ts_recv = get_attr(record, "ts_recv", None)
+
+    bar_open = convert_price(get_attr(record, "open", None))
+    bar_high = convert_price(get_attr(record, "high", None))
+    bar_low = convert_price(get_attr(record, "low", None))
+    bar_close = convert_price(get_attr(record, "close", None))
+
     try:
-        record_text = str(record)
+        bar_volume = int(get_attr(record, "volume", 0) or 0)
+    except Exception:
+        bar_volume = 0
 
-        with state_lock:
-            state["record_count"] += 1
-            state["last_any_record_at"] = now_iso()
+    if bar_close is None:
+        return
 
-        save_debug(record_text)
+    event_seconds = ts_event / 1_000_000_000 if ts_event is not None else time.time()
+    one_min_bucket = floor_to_minute(event_seconds)
+    five_min_bucket = floor_to_5min(event_seconds)
 
-        clean_symbol = identify_symbol(record)
-        if clean_symbol is None:
-            return
+    with state_lock:
+        symbol_state = state["symbols"][clean_symbol]
 
-        ts_event = get_attr(record, "ts_event", None)
-        ts_recv = get_attr(record, "ts_recv", None)
+        previous_open = symbol_state.get("open")
+        previous_high = symbol_state.get("high")
+        previous_low = symbol_state.get("low")
+        previous_vwap = symbol_state.get("vwap")
+        previous_volume = int(symbol_state.get("volume") or 0)
 
-        trade_price = convert_price(get_attr(record, "price", None))
-        if trade_price is None:
-            trade_price = convert_price(get_attr(record, "px", None))
-        if trade_price is None:
-            trade_price = convert_price(get_attr(record, "close", None))
-        if trade_price is None:
-            return
+        session_open = previous_open if previous_open is not None else bar_open
+        session_high = max(x for x in [previous_high, bar_high, bar_close] if x is not None)
+        session_low = min(x for x in [previous_low, bar_low, bar_close] if x is not None)
 
-        try:
-            trade_size = int(get_attr(record, "size", 0) or 0)
-        except Exception:
-            trade_size = 0
+        new_total_volume = previous_volume + bar_volume
 
-        event_seconds = ts_event / 1_000_000_000 if ts_event is not None else time.time()
-        one_min_bucket = floor_to_minute(event_seconds)
-        five_min_bucket = floor_to_5min(event_seconds)
+        typical_price = (
+            (bar_high + bar_low + bar_close) / 3
+            if bar_high is not None and bar_low is not None
+            else bar_close
+        )
 
-        with state_lock:
-            symbol_state = state["symbols"][clean_symbol]
+        if previous_vwap is not None and previous_volume > 0 and bar_volume > 0:
+            session_vwap = ((previous_vwap * previous_volume) + (typical_price * bar_volume)) / max(new_total_volume, 1)
+        elif bar_volume > 0:
+            session_vwap = typical_price
+        else:
+            session_vwap = previous_vwap or typical_price
 
-            previous_open = symbol_state.get("open")
-            previous_high = symbol_state.get("high")
-            previous_low = symbol_state.get("low")
-            previous_vwap = symbol_state.get("vwap")
-            previous_volume = int(symbol_state.get("volume") or 0)
+        current_1m = symbol_state.get("current_1m_bar")
 
-            session_open = previous_open if previous_open is not None else trade_price
-            session_high = max(x for x in [previous_high, trade_price] if x is not None)
-            session_low = min(x for x in [previous_low, trade_price] if x is not None)
+        if current_1m is not None and current_1m.get("bucket") != one_min_bucket:
+            append_limited(symbol_state["bars_1m"], finalize_bar(current_1m))
+            current_1m = None
 
-            new_total_volume = previous_volume + trade_size
+        current_1m = update_bar(
+            current_1m,
+            one_min_bucket,
+            bar_open,
+            bar_high,
+            bar_low,
+            bar_close,
+            bar_volume,
+        )
 
-            if previous_vwap is not None and previous_volume > 0 and trade_size > 0:
-                session_vwap = (
-                    (previous_vwap * previous_volume) +
-                    (trade_price * trade_size)
-                ) / max(new_total_volume, 1)
-            elif trade_size > 0:
-                session_vwap = trade_price
-            else:
-                session_vwap = previous_vwap or trade_price
+        current_5m = symbol_state.get("current_5m_bar")
 
-            current_1m = symbol_state.get("current_1m_bar")
-            if current_1m is not None and current_1m.get("bucket") != one_min_bucket:
-                append_limited(symbol_state["bars_1m"], finalize_bar(current_1m))
-                current_1m = None
+        if current_5m is not None and current_5m.get("bucket") != five_min_bucket:
+            append_limited(symbol_state["bars_5m"], finalize_bar(current_5m))
+            current_5m = None
 
-            current_1m = update_bar(current_1m, one_min_bucket, trade_price, trade_size)
+        current_5m = update_bar(
+            current_5m,
+            five_min_bucket,
+            bar_open,
+            bar_high,
+            bar_low,
+            bar_close,
+            bar_volume,
+        )
 
-            current_5m = symbol_state.get("current_5m_bar")
-            if current_5m is not None and current_5m.get("bucket") != five_min_bucket:
-                append_limited(symbol_state["bars_5m"], finalize_bar(current_5m))
-                current_5m = None
+        last_tick_timestamp = ns_to_iso(ts_event) or now_iso()
+        last_bar_timestamp = current_1m.get("timestamp") if current_1m else None
 
-            current_5m = update_bar(current_5m, five_min_bucket, trade_price, trade_size)
-
-            last_tick_timestamp = ns_to_iso(ts_event) or now_iso()
-            last_bar_timestamp = current_1m.get("timestamp") if current_1m else None
-            instrument_id = get_instrument_id(record)
-
-            symbol_state.update(
-                {
-                    "ok": True,
-                    "symbol": clean_symbol,
-                    "requested_symbol": SYMBOLS[clean_symbol],
-                    "databento_symbol": SYMBOLS[clean_symbol],
-                    "instrument_id": instrument_id,
-                    "status": "live",
-                    "price": trade_price,
-                    "last": trade_price,
-                    "open": session_open,
-                    "high": session_high,
-                    "low": session_low,
-                    "close": trade_price,
-                    "vwap": session_vwap,
-                    "volume": new_total_volume,
-                    "bar": {
-                        "open": trade_price,
-                        "high": trade_price,
-                        "low": trade_price,
-                        "close": trade_price,
-                        "volume": trade_size,
-                        "timestamp": last_tick_timestamp,
-                        "source": "databento_live_trade",
-                    },
-                    "raw": record_text[:1000],
-                    "current_1m_bar": current_1m,
-                    "current_5m_bar": current_5m,
-                    "ts_event": ns_to_iso(ts_event),
-                    "ts_recv": ns_to_iso(ts_recv),
-                    "age_seconds": ns_age_seconds(ts_event),
-                    "received_at": now_iso(),
-                    "updated_at": now_iso(),
-                    "ohlcv_source": "databento_live_trades",
-                    "last_tick_timestamp": last_tick_timestamp,
-                    "last_bar_timestamp": last_bar_timestamp,
-                }
-            )
-
-            update_realtime_flags(symbol_state)
-
-            state["ok"] = True
-            state["last_heartbeat"] = now_iso()
-            state["last_record_at"] = state["last_heartbeat"]
-            state["last_error"] = None
-
-    except Exception as error:
-        with state_lock:
-            state["last_error"] = {
-                "message": str(error),
-                "trace": traceback.format_exc()[-2000:],
-                "time": now_iso(),
+        symbol_state.update(
+            {
+                "ok": True,
+                "symbol": clean_symbol,
+                "requested_symbol": SYMBOLS[clean_symbol],
+                "status": "live",
+                "price": bar_close,
+                "last": bar_close,
+                "open": session_open,
+                "high": session_high,
+                "low": session_low,
+                "close": bar_close,
+                "vwap": session_vwap,
+                "volume": new_total_volume,
+                "bar": {
+                    "open": bar_open,
+                    "high": bar_high,
+                    "low": bar_low,
+                    "close": bar_close,
+                    "volume": bar_volume,
+                    "timestamp": last_tick_timestamp,
+                    "source": "databento_live_ohlcv_1s",
+                },
+                "current_1m_bar": current_1m,
+                "current_5m_bar": current_5m,
+                "ts_event": ns_to_iso(ts_event),
+                "ts_recv": ns_to_iso(ts_recv),
+                "age_seconds": ns_age_seconds(ts_event),
+                "updated_at": now_iso(),
+                "ohlcv_source": "databento_live_ohlcv_1s",
+                "last_tick_timestamp": last_tick_timestamp,
+                "last_bar_timestamp": last_bar_timestamp,
             }
+        )
+
+        update_realtime_flags(symbol_state)
+
+        state["ok"] = True
+        state["last_heartbeat"] = now_iso()
+        state["last_error"] = None
 
 
 def live_worker():
@@ -452,10 +392,7 @@ def live_worker():
                 symbols=list(SYMBOLS.values()),
             )
 
-            client.add_callback(update_from_trade)
-
-            state["live_client_started"] = True
-
+            client.add_callback(update_from_live_ohlcv)
             client.start()
             client.block_for_close()
 
@@ -495,23 +432,15 @@ def health():
 
         return {
             "ok": len(valid_symbols) > 0,
-            "service": "edgeos-databento-live-proxy",
             "source": state["source"],
             "dataset": state["dataset"],
             "schema": state["schema"],
             "stype_in": state["stype_in"],
             "roll_rule": state["roll_rule"],
-            "hasKey": bool(DATABENTO_API_KEY),
-            "liveClientStarted": state.get("live_client_started", state["last_heartbeat"] is not None),
             "valid_symbols": valid_symbols,
             "waiting_symbols": waiting_symbols,
-            "lastRecordAt": state["last_record_at"],
-            "lastAnyRecordAt": state["last_any_record_at"],
-            "recordCount": state["record_count"],
             "last_heartbeat": state["last_heartbeat"],
-            "error": state["last_error"],
             "last_error": state["last_error"],
-            "time": now_iso(),
             "server_time": now_iso(),
             "bar_builder": {
                 "enabled": True,
@@ -572,16 +501,15 @@ def snapshot():
             "data": symbols,
 
             "status": {
-                "live_client_started": state.get("live_client_started", state["last_heartbeat"] is not None),
-                "last_record_at": state["last_record_at"],
-                "last_any_record_at": state["last_any_record_at"],
-                "record_count": state["record_count"],
+                "live_client_started": state["last_heartbeat"] is not None,
+                "last_record_at": state["last_heartbeat"],
+                "last_any_record_at": state["last_heartbeat"],
                 "error": state["last_error"],
             },
             "last_error": state["last_error"],
             "note": (
-                "Live price comes from Databento live trades. "
-                "Rolling 1m and 5m bars are built inside the Railway proxy from actual live TradeMsg records. "
+                "Live price comes from Databento live OHLCV-1s close. "
+                "Rolling 1m and 5m bars are built inside the Railway proxy from live 1-second records. "
                 "Historical REST bars are not labeled as real-time."
             ),
         }
@@ -599,15 +527,5 @@ def debug():
                 "symbols": SYMBOLS,
             },
             "state": state,
-            "instrument_to_symbol": instrument_to_symbol,
-            "latest_prices": {
-                symbol: data for symbol, data in state["symbols"].items() if data.get("ok") is True
-            },
-            "last_records": debug_records,
             "server_time": now_iso(),
         }
-'''
-
-path = Path("/mnt/data/main.py")
-path.write_text(main_py)
-print(f"Created {path} ({path.stat().st_size} bytes)")
