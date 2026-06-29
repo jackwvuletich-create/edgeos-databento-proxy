@@ -394,7 +394,7 @@ def update_from_trade(record: Any):
 
         update_realtime_flags(symbol_state)
 
-                state["ok"] = True
+        state["ok"] = True
         state["last_heartbeat"] = now_iso()
         state["last_record_at"] = state["last_heartbeat"]
         state["last_error"] = None
