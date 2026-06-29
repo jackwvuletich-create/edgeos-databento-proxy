@@ -1,5 +1,3 @@
-from pathlib import Path
-
 main_py = r'''import os
 import time
 import threading
