@@ -520,7 +520,7 @@ def snapshot():
             "roll_rule": ROLL_RULE,
             "generatedAt": now_iso(),
             "server_time": now_iso(),
-           in "valid_symbols": valid_symbols,
+           "valid_symbols": valid_symbols,
             "waiting_symbols": waiting_symbols,
 
             # New shape
