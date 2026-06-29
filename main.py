@@ -13,8 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY")
 DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
 SCHEMA = os.getenv("DATABENTO_SCHEMA", "ohlcv-1s")
-ROLL_RULE = os.getenv("ROLL_RULE", "v")
-
+ROLL_RULE = "c"
 SYMBOLS = {
     "NQ": f"NQ.{ROLL_RULE}.0",
     "ES": f"ES.{ROLL_RULE}.0",
