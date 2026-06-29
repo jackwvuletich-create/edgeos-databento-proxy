@@ -360,7 +360,7 @@ def update_from_trade(record: Any):
 
         update_realtime_flags(symbol_state)
 
-                state["ok"] = True
+        state["ok"] = True
         state["last_heartbeat"] = now_iso()
         state["last_error"] = None
 
@@ -379,7 +379,7 @@ def live_worker():
 
             client = db.Live(key=DATABENTO_API_KEY)
 
-                        client.subscribe(
+            client.subscribe(
                 dataset=DATASET,
                 schema=SCHEMA,
                 stype_in="continuous",
@@ -389,7 +389,7 @@ def live_worker():
             client.add_callback(update_from_trade)
             client.start()
             client.block_for_close()
-
+            
         except Exception as error:
             with state_lock:
                 state["ok"] = False
