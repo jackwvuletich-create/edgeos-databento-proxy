@@ -207,10 +207,10 @@ def identify_symbol(record: Any) -> Optional[str]:
                     instrument_to_symbol[instrument_id] = clean_symbol
                 return clean_symbol
 
-if instrument_id is not None:
-    return instrument_to_symbol.get(instrument_id)
+    if instrument_id is not None:
+        return instrument_to_symbol.get(instrument_id)
 
-return None
+    return None
 
 
 def append_limited(bar_list: List[Dict[str, Any]], bar: Dict[str, Any]):
