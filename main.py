@@ -12,8 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY")
 DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
-SCHEMA = os.getenv("DATABENTO_SCHEMA", "ohlcv-1s")
-ROLL_RULE = os.getenv("ROLL_RULE", "v")
+SCHEMA = "trades"
+ROLL_RULE = "c"
 
 SYMBOLS = {
     "NQ": f"NQ.{ROLL_RULE}.0",
@@ -240,7 +240,7 @@ def update_realtime_flags(symbol_state: Dict[str, Any]):
     symbol_state["bar_source"] = bar_source
 
 
-def update_from_live_ohlcv(record: Any):
+def update_from_trade(record: Any):
     clean_symbol = identify_symbol(record)
 
     if clean_symbol is None:
@@ -249,18 +249,18 @@ def update_from_live_ohlcv(record: Any):
     ts_event = get_attr(record, "ts_event", None)
     ts_recv = get_attr(record, "ts_recv", None)
 
-    bar_open = convert_price(get_attr(record, "open", None))
-    bar_high = convert_price(get_attr(record, "high", None))
-    bar_low = convert_price(get_attr(record, "low", None))
-    bar_close = convert_price(get_attr(record, "close", None))
+    trade_price = convert_price(get_attr(record, "price", None))
+    if trade_price is None:
+        trade_price = convert_price(get_attr(record, "px", None))
+    if trade_price is None:
+        trade_price = convert_price(get_attr(record, "close", None))
+    if trade_price is None:
+        return
 
     try:
-        bar_volume = int(get_attr(record, "volume", 0) or 0)
+        trade_size = int(get_attr(record, "size", 0) or 0)
     except Exception:
-        bar_volume = 0
-
-    if bar_close is None:
-        return
+        trade_size = 0
 
     event_seconds = ts_event / 1_000_000_000 if ts_event is not None else time.time()
     one_min_bucket = floor_to_minute(event_seconds)
@@ -275,24 +275,18 @@ def update_from_live_ohlcv(record: Any):
         previous_vwap = symbol_state.get("vwap")
         previous_volume = int(symbol_state.get("volume") or 0)
 
-        session_open = previous_open if previous_open is not None else bar_open
-        session_high = max(x for x in [previous_high, bar_high, bar_close] if x is not None)
-        session_low = min(x for x in [previous_low, bar_low, bar_close] if x is not None)
+        session_open = previous_open if previous_open is not None else trade_price
+        session_high = max(x for x in [previous_high, trade_price] if x is not None)
+        session_low = min(x for x in [previous_low, trade_price] if x is not None)
 
-        new_total_volume = previous_volume + bar_volume
+        new_total_volume = previous_volume + trade_size
 
-        typical_price = (
-            (bar_high + bar_low + bar_close) / 3
-            if bar_high is not None and bar_low is not None
-            else bar_close
-        )
-
-        if previous_vwap is not None and previous_volume > 0 and bar_volume > 0:
-            session_vwap = ((previous_vwap * previous_volume) + (typical_price * bar_volume)) / max(new_total_volume, 1)
-        elif bar_volume > 0:
-            session_vwap = typical_price
+        if previous_vwap is not None and previous_volume > 0 and trade_size > 0:
+            session_vwap = ((previous_vwap * previous_volume) + (trade_price * trade_size)) / max(new_total_volume, 1)
+        elif trade_size > 0:
+            session_vwap = trade_price
         else:
-            session_vwap = previous_vwap or typical_price
+            session_vwap = previous_vwap or trade_price
 
         current_1m = symbol_state.get("current_1m_bar")
 
@@ -303,11 +297,11 @@ def update_from_live_ohlcv(record: Any):
         current_1m = update_bar(
             current_1m,
             one_min_bucket,
-            bar_open,
-            bar_high,
-            bar_low,
-            bar_close,
-            bar_volume,
+            trade_price,
+            trade_price,
+            trade_price,
+            trade_price,
+            trade_size,
         )
 
         current_5m = symbol_state.get("current_5m_bar")
@@ -319,11 +313,11 @@ def update_from_live_ohlcv(record: Any):
         current_5m = update_bar(
             current_5m,
             five_min_bucket,
-            bar_open,
-            bar_high,
-            bar_low,
-            bar_close,
-            bar_volume,
+            trade_price,
+            trade_price,
+            trade_price,
+            trade_price,
+            trade_size,
         )
 
         last_tick_timestamp = ns_to_iso(ts_event) or now_iso()
@@ -335,22 +329,22 @@ def update_from_live_ohlcv(record: Any):
                 "symbol": clean_symbol,
                 "requested_symbol": SYMBOLS[clean_symbol],
                 "status": "live",
-                "price": bar_close,
-                "last": bar_close,
+                "price": trade_price,
+                "last": trade_price,
                 "open": session_open,
                 "high": session_high,
                 "low": session_low,
-                "close": bar_close,
+                "close": trade_price,
                 "vwap": session_vwap,
                 "volume": new_total_volume,
                 "bar": {
-                    "open": bar_open,
-                    "high": bar_high,
-                    "low": bar_low,
-                    "close": bar_close,
-                    "volume": bar_volume,
+                    "open": trade_price,
+                    "high": trade_price,
+                    "low": trade_price,
+                    "close": trade_price,
+                    "volume": trade_size,
                     "timestamp": last_tick_timestamp,
-                    "source": "databento_live_ohlcv_1s",
+                    "source": "databento_live_trade",
                 },
                 "current_1m_bar": current_1m,
                 "current_5m_bar": current_5m,
@@ -358,7 +352,7 @@ def update_from_live_ohlcv(record: Any):
                 "ts_recv": ns_to_iso(ts_recv),
                 "age_seconds": ns_age_seconds(ts_event),
                 "updated_at": now_iso(),
-                "ohlcv_source": "databento_live_ohlcv_1s",
+                "ohlcv_source": "databento_live_trades",
                 "last_tick_timestamp": last_tick_timestamp,
                 "last_bar_timestamp": last_bar_timestamp,
             }
@@ -367,7 +361,12 @@ def update_from_live_ohlcv(record: Any):
         update_realtime_flags(symbol_state)
 
         state["ok"] = True
+                state["ok"] = True
         state["last_heartbeat"] = now_iso()
+        state["last_error"] = None
+
+
+def live_worker():
         state["last_error"] = None
 
 
@@ -389,10 +388,10 @@ def live_worker():
                 dataset=DATASET,
                 schema=SCHEMA,
                 stype_in="continuous",
-                symbols=list(SYMBOLS.values()),
+                client.add_callback(update_from_trade)
             )
 
-            client.add_callback(update_from_live_ohlcv)
+            client.add_callback(update_from_trade)
             client.start()
             client.block_for_close()
 
