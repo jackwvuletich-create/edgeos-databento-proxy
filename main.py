@@ -183,8 +183,16 @@ def identify_symbol(record: Any) -> Optional[str]:
     raw_text = str(record)
     instrument_id = get_instrument_id(record)
 
+    # Exact requested symbol match first
     for clean_symbol, requested_symbol in SYMBOLS.items():
-        if requested_symbol in raw_text or f"{clean_symbol}." in raw_text:
+        if requested_symbol in raw_text:
+            if instrument_id is not None:
+                instrument_to_symbol[instrument_id] = clean_symbol
+            return clean_symbol
+
+    # SymbolMappingMsg fallback
+    for clean_symbol, requested_symbol in SYMBOLS.items():
+        if f"stype_in_symbol='{requested_symbol}'" in raw_text:
             if instrument_id is not None:
                 instrument_to_symbol[instrument_id] = clean_symbol
             return clean_symbol
@@ -194,7 +202,7 @@ def identify_symbol(record: Any) -> Optional[str]:
     if direct_symbol:
         direct_symbol = str(direct_symbol)
         for clean_symbol, requested_symbol in SYMBOLS.items():
-            if direct_symbol == requested_symbol or direct_symbol.startswith(f"{clean_symbol}."):
+            if direct_symbol == requested_symbol:
                 if instrument_id is not None:
                     instrument_to_symbol[instrument_id] = clean_symbol
                 return clean_symbol
@@ -202,7 +210,7 @@ def identify_symbol(record: Any) -> Optional[str]:
     if instrument_id is not None:
         return instrument_to_symbol.get(instrument_id)
 
-    return None
+    return None    return None
     
 def append_limited(bar_list: List[Dict[str, Any]], bar: Dict[str, Any]):
     bar_list.append(bar)
